@@ -6,6 +6,7 @@
 - Условного форматирования
 - Многоуровневой группировки
 - Интерактивных элементов
+- Изображений в таблицах и секциях
 """
 
 import pandas as pd
@@ -15,11 +16,16 @@ from openpyxl.formatting.rule import ColorScaleRule, CellIsRule, FormulaRule
 from openpyxl.utils.dataframe import dataframe_to_rows
 from openpyxl.worksheet.table import Table, TableStyleInfo
 from openpyxl.chart import BarChart, LineChart, PieChart, Reference
+from openpyxl.drawing.image import Image
 from datetime import datetime, timedelta
 import json
 from jinja2 import Template
 import tempfile
 import os
+import requests
+import base64
+from io import BytesIO
+from PIL import Image as PILImage, ImageDraw, ImageFont
 
 
 class AdvancedExcelRenderer:
@@ -188,6 +194,10 @@ class AdvancedExcelRenderer:
             current_row = self._add_grouped_data(section_data, section_start_row)
         elif section_type == 'chart':
             current_row = self._add_chart_section(section_data, section_start_row)
+        elif section_type == 'image':
+            current_row = self._add_image_section(section_data, section_start_row)
+        elif section_type == 'drawing':
+            current_row = self._add_drawing_section(section_data, section_start_row)
         else:
             current_row = section_start_row
         
@@ -200,6 +210,8 @@ class AdvancedExcelRenderer:
     def _add_table_with_filters(self, section_data, start_row):
         """Добавление таблицы с автофильтрами"""
         data = section_data.get('data', [])
+        image_columns = section_data.get('image_columns', [])
+        
         if not data:
             return start_row
         
@@ -211,6 +223,10 @@ class AdvancedExcelRenderer:
         if not data or not isinstance(data[0], dict):
             print(f"Предупреждение: пустые данные или неверный формат в секции '{section_data.get('title', 'Unknown')}'")
             return start_row
+
+        # Если есть колонки с изображениями, используем специальный метод
+        if image_columns:
+            return self._add_table_with_images(section_data, start_row)
 
         df = pd.DataFrame(data)
         
@@ -408,6 +424,608 @@ class AdvancedExcelRenderer:
         # Закрепление области
         self.ws.freeze_panes = 'A4'
     
+    def _add_image_section(self, section_data, start_row):
+        """Добавление секции с изображением"""
+        image_config = section_data.get('image_config', {})
+        
+        if not image_config:
+            print(f"Предупреждение: отсутствует конфигурация изображения в секции '{section_data.get('title', 'Unknown')}'")
+            return start_row + 2
+        
+        image_type = image_config.get('type', 'url')
+        source = image_config.get('source', '')
+        width = image_config.get('width', 300)
+        height = image_config.get('height', 200)
+        anchor = image_config.get('anchor', f'B{start_row}')
+        description = image_config.get('description', '')
+        
+        try:
+            excel_img = None
+            
+            if image_type == 'url':
+                excel_img = self._load_image_from_url(source)
+            elif image_type == 'base64':
+                excel_img = self._load_image_from_base64(source)
+            elif image_type == 'file':
+                excel_img = self._load_image_from_file(source)
+            
+            if excel_img:
+                # Устанавливаем размеры
+                excel_img.width = width
+                excel_img.height = height
+                
+                # Добавляем изображение в лист
+                self.ws.add_image(excel_img, anchor)
+                
+                # Добавляем описание если есть
+                if description:
+                    desc_row = start_row + int(height / 20) + 1
+                    self.ws.cell(row=desc_row, column=2, value=description)
+                    self.ws.cell(row=desc_row, column=2).font = Font(italic=True, size=9)
+                
+                return start_row + int(height / 20) + 3
+            else:
+                # Если изображение не загрузилось, добавляем текст-заглушку
+                self.ws.cell(row=start_row, column=2, value=f"❌ Не удалось загрузить изображение: {source}")
+                self.ws.cell(row=start_row, column=2).font = Font(color="FF0000")
+                return start_row + 2
+                
+        except Exception as e:
+            print(f"Ошибка при добавлении изображения: {e}")
+            self.ws.cell(row=start_row, column=2, value=f"❌ Ошибка загрузки изображения: {str(e)}")
+            self.ws.cell(row=start_row, column=2).font = Font(color="FF0000")
+            return start_row + 2
+    
+    def _add_drawing_section(self, section_data, start_row):
+        """Добавление секции с программным рисованием"""
+        drawing_config = section_data.get('drawing_config', {})
+        drawing_type = drawing_config.get('type', 'diagram')
+        
+        if drawing_type == 'diagram':
+            return self._create_diagram(drawing_config, start_row)
+        elif drawing_type == 'flowchart':
+            return self._create_flowchart(drawing_config, start_row)
+        elif drawing_type == 'infographic':
+            return self._create_infographic(drawing_config, start_row)
+        elif drawing_type == 'custom':
+            return self._create_custom_drawing(drawing_config, start_row)
+        else:
+            print(f"Неподдерживаемый тип рисования: {drawing_type}")
+            return start_row + 2
+    
+    def _load_image_from_url(self, url):
+        """Загрузка изображения из URL"""
+        try:
+            response = requests.get(url, timeout=10)
+            response.raise_for_status()
+            return Image(BytesIO(response.content))
+        except Exception as e:
+            print(f"Ошибка загрузки изображения из URL {url}: {e}")
+            return None
+    
+    def _load_image_from_base64(self, base64_string):
+        """Загрузка изображения из base64 строки"""
+        try:
+            # Убираем префикс data:image/...;base64, если есть
+            if ',' in base64_string:
+                base64_string = base64_string.split(',')[1]
+            
+            image_data = base64.b64decode(base64_string)
+            return Image(BytesIO(image_data))
+        except Exception as e:
+            print(f"Ошибка декодирования base64 изображения: {e}")
+            return None
+    
+    def _load_image_from_file(self, file_path):
+        """Загрузка изображения из файла"""
+        try:
+            if os.path.exists(file_path):
+                return Image(file_path)
+            else:
+                print(f"Файл изображения не найден: {file_path}")
+                return None
+        except Exception as e:
+            print(f"Ошибка загрузки изображения из файла {file_path}: {e}")
+            return None
+    
+    def _add_table_with_images(self, section_data, start_row):
+        """Добавление таблицы с поддержкой изображений в ячейках"""
+        data = section_data.get('data', [])
+        image_columns = section_data.get('image_columns', [])  # Колонки с изображениями
+        
+        if not data:
+            return start_row
+        
+        if not isinstance(data, list) or not isinstance(data[0], dict):
+            print(f"Предупреждение: неверный формат данных в секции '{section_data.get('title', 'Unknown')}'")
+            return start_row
+
+        df = pd.DataFrame(data)
+        
+        # Заголовки таблицы
+        for col_idx, column in enumerate(df.columns, 1):
+            cell = self.ws.cell(row=start_row, column=col_idx, value=column)
+            cell.style = "header_style"
+        
+        # Данные таблицы
+        current_row = start_row + 1
+        for row_idx, (_, row_data) in enumerate(df.iterrows()):
+            row_height = 20  # Стандартная высота строки
+            
+            for col_idx, (column, value) in enumerate(row_data.items(), 1):
+                cell = self.ws.cell(row=current_row, column=col_idx)
+                
+                # Проверяем, является ли колонка колонкой с изображениями
+                if column in image_columns and value:
+                    try:
+                        # Пытаемся загрузить изображение
+                        excel_img = None
+                        
+                        if isinstance(value, dict):
+                            # Если значение - это конфигурация изображения
+                            img_type = value.get('type', 'url')
+                            img_source = value.get('source', '')
+                            img_width = value.get('width', 80)
+                            img_height = value.get('height', 60)
+                            
+                            if img_type == 'url':
+                                excel_img = self._load_image_from_url(img_source)
+                            elif img_type == 'base64':
+                                excel_img = self._load_image_from_base64(img_source)
+                            elif img_type == 'file':
+                                excel_img = self._load_image_from_file(img_source)
+                        else:
+                            # Если значение - это просто URL или путь к файлу
+                            if str(value).startswith('http'):
+                                excel_img = self._load_image_from_url(str(value))
+                            else:
+                                excel_img = self._load_image_from_file(str(value))
+                            
+                            img_width = 80
+                            img_height = 60
+                        
+                        if excel_img:
+                            excel_img.width = img_width
+                            excel_img.height = img_height
+                            
+                            # Добавляем изображение в ячейку
+                            cell_address = f"{chr(64 + col_idx)}{current_row}"
+                            self.ws.add_image(excel_img, cell_address)
+                            
+                            # Устанавливаем высоту строки
+                            row_height = max(row_height, img_height + 10)
+                            
+                            # Устанавливаем ширину колонки
+                            col_letter = chr(64 + col_idx)
+                            current_width = self.ws.column_dimensions[col_letter].width or 10
+                            new_width = max(current_width, (img_width / 7) + 2)
+                            self.ws.column_dimensions[col_letter].width = new_width
+                        else:
+                            cell.value = "❌ Изображение не загружено"
+                            cell.font = Font(color="FF0000", size=8)
+                            
+                    except Exception as e:
+                        print(f"Ошибка при добавлении изображения в ячейку: {e}")
+                        cell.value = "❌ Ошибка"
+                        cell.font = Font(color="FF0000", size=8)
+                else:
+                    # Обычные данные
+                    cell.value = value
+                    if isinstance(value, (int, float)):
+                        cell.style = "number_style"
+                    else:
+                        cell.style = "data_style"
+            
+            # Устанавливаем высоту строки
+            self.ws.row_dimensions[current_row].height = row_height
+            current_row += 1
+        
+        return current_row + 1
+    
+    def _create_diagram(self, config, start_row):
+        """Создание диаграммы программно"""
+        diagram_data = config.get('data', [])
+        diagram_style = config.get('style', 'boxes')
+        
+        # Создаем изображение с помощью PIL
+        img_width = config.get('width', 600)
+        img_height = config.get('height', 400)
+        
+        # Создаем изображение
+        pil_img = PILImage.new('RGB', (img_width, img_height), 'white')
+        draw = ImageDraw.Draw(pil_img)
+        
+        try:
+            # Пытаемся загрузить шрифт
+            font = ImageFont.truetype("arial.ttf", 12)
+            title_font = ImageFont.truetype("arial.ttf", 16)
+        except:
+            # Используем стандартный шрифт если arial не найден
+            font = ImageFont.load_default()
+            title_font = ImageFont.load_default()
+        
+        # Заголовок диаграммы
+        title = config.get('title', 'Диаграмма')
+        draw.text((img_width//2 - len(title)*4, 10), title, fill='black', font=title_font)
+        
+        if diagram_style == 'boxes':
+            self._draw_box_diagram(draw, diagram_data, img_width, img_height, font)
+        elif diagram_style == 'circles':
+            self._draw_circle_diagram(draw, diagram_data, img_width, img_height, font)
+        elif diagram_style == 'flow':
+            self._draw_flow_diagram(draw, diagram_data, img_width, img_height, font)
+        
+        try:
+            # Сохраняем изображение в память
+            img_buffer = BytesIO()
+            pil_img.save(img_buffer, format='PNG')
+            img_buffer.seek(0)
+            
+            # Добавляем в Excel
+            excel_img = Image(img_buffer)
+            excel_img.width = img_width // 2  # Масштабируем для Excel
+            excel_img.height = img_height // 2
+            
+            self.ws.add_image(excel_img, f'B{start_row}')
+            
+        except Exception as e:
+            print(f"Ошибка добавления диаграммы в Excel: {e}")
+        
+        return start_row + int(img_height / 30) + 2
+    
+    def _draw_box_diagram(self, draw, data, width, height, font):
+        """Рисование диаграммы с прямоугольниками"""
+        if not data:
+            return
+        
+        box_width = min(120, (width - 100) // len(data))
+        box_height = 60
+        start_y = height // 2 - box_height // 2
+        
+        for i, item in enumerate(data):
+            x = 50 + i * (box_width + 20)
+            y = start_y
+            
+            # Цвет прямоугольника
+            color = item.get('color', '#4472C4')
+            if color.startswith('#'):
+                color = tuple(int(color[i:i+2], 16) for i in (1, 3, 5))
+            else:
+                color = (68, 114, 196)  # Синий по умолчанию
+            
+            # Рисуем прямоугольник
+            draw.rectangle([x, y, x + box_width, y + box_height], 
+                          fill=color, outline='black', width=2)
+            
+            # Текст
+            text = item.get('label', f'Item {i+1}')
+            text_bbox = draw.textbbox((0, 0), text, font=font)
+            text_width = text_bbox[2] - text_bbox[0]
+            text_height = text_bbox[3] - text_bbox[1]
+            
+            text_x = x + (box_width - text_width) // 2
+            text_y = y + (box_height - text_height) // 2
+            
+            draw.text((text_x, text_y), text, fill='white', font=font)
+            
+            # Значение под прямоугольником
+            value = item.get('value', '')
+            if value:
+                value_text = str(value)
+                value_bbox = draw.textbbox((0, 0), value_text, font=font)
+                value_width = value_bbox[2] - value_bbox[0]
+                value_x = x + (box_width - value_width) // 2
+                draw.text((value_x, y + box_height + 5), value_text, fill='black', font=font)
+    
+    def _draw_circle_diagram(self, draw, data, width, height, font):
+        """Рисование диаграммы с кругами"""
+        if not data:
+            return
+        
+        circle_radius = min(40, min(width, height) // 6)
+        center_y = height // 2
+        
+        for i, item in enumerate(data):
+            x = 80 + i * (circle_radius * 3)
+            y = center_y
+            
+            # Цвет круга
+            color = item.get('color', '#4472C4')
+            if color.startswith('#'):
+                color = tuple(int(color[i:i+2], 16) for i in (1, 3, 5))
+            else:
+                color = (68, 114, 196)
+            
+            # Рисуем круг
+            draw.ellipse([x - circle_radius, y - circle_radius, 
+                         x + circle_radius, y + circle_radius], 
+                        fill=color, outline='black', width=2)
+            
+            # Текст в центре круга
+            text = item.get('label', f'Item {i+1}')
+            text_bbox = draw.textbbox((0, 0), text, font=font)
+            text_width = text_bbox[2] - text_bbox[0]
+            text_height = text_bbox[3] - text_bbox[1]
+            
+            text_x = x - text_width // 2
+            text_y = y - text_height // 2
+            
+            draw.text((text_x, text_y), text, fill='white', font=font)
+            
+            # Значение под кругом
+            value = item.get('value', '')
+            if value:
+                value_text = str(value)
+                value_bbox = draw.textbbox((0, 0), value_text, font=font)
+                value_width = value_bbox[2] - value_bbox[0]
+                value_x = x - value_width // 2
+                draw.text((value_x, y + circle_radius + 10), value_text, fill='black', font=font)
+    
+    def _draw_flow_diagram(self, draw, data, width, height, font):
+        """Рисование блок-схемы"""
+        if not data:
+            return
+        
+        box_width = min(150, (width - 100) // len(data))
+        box_height = 50
+        start_y = height // 2 - box_height // 2
+        
+        for i, item in enumerate(data):
+            x = 50 + i * (box_width + 30)
+            y = start_y
+            
+            # Цвет блока
+            color = item.get('color', '#4472C4')
+            if color.startswith('#'):
+                color = tuple(int(color[i:i+2], 16) for i in (1, 3, 5))
+            else:
+                color = (68, 114, 196)
+            
+            # Рисуем блок
+            draw.rectangle([x, y, x + box_width, y + box_height], 
+                          fill=color, outline='black', width=2)
+            
+            # Текст
+            text = item.get('label', f'Step {i+1}')
+            text_bbox = draw.textbbox((0, 0), text, font=font)
+            text_width = text_bbox[2] - text_bbox[0]
+            text_height = text_bbox[3] - text_bbox[1]
+            
+            text_x = x + (box_width - text_width) // 2
+            text_y = y + (box_height - text_height) // 2
+            
+            draw.text((text_x, text_y), text, fill='white', font=font)
+            
+            # Стрелка к следующему блоку
+            if i < len(data) - 1:
+                arrow_start_x = x + box_width
+                arrow_end_x = x + box_width + 30
+                arrow_y = y + box_height // 2
+                
+                # Линия стрелки
+                draw.line([arrow_start_x, arrow_y, arrow_end_x, arrow_y], 
+                         fill='black', width=2)
+                
+                # Наконечник стрелки
+                draw.polygon([arrow_end_x, arrow_y, 
+                             arrow_end_x - 10, arrow_y - 5,
+                             arrow_end_x - 10, arrow_y + 5], 
+                            fill='black')
+    
+    def _create_flowchart(self, config, start_row):
+        """Создание блок-схемы"""
+        # Пока используем тот же метод что и для диаграмм
+        return self._create_diagram(config, start_row)
+    
+    def _create_infographic(self, config, start_row):
+        """Создание инфографики"""
+        infographic_data = config.get('data', [])
+        
+        # Создаем изображение
+        img_width = config.get('width', 800)
+        img_height = config.get('height', 500)
+        
+        pil_img = PILImage.new('RGB', (img_width, img_height), 'white')
+        draw = ImageDraw.Draw(pil_img)
+        
+        try:
+            font = ImageFont.truetype("arial.ttf", 12)
+            title_font = ImageFont.truetype("arial.ttf", 16)
+        except:
+            font = ImageFont.load_default()
+            title_font = ImageFont.load_default()
+        
+        # Заголовок
+        title = config.get('title', 'Инфографика')
+        draw.text((img_width//2 - len(title)*6, 10), title, fill='black', font=title_font)
+        
+        # Размещение элементов
+        cols = 3  # Количество колонок
+        rows = (len(infographic_data) + cols - 1) // cols
+        
+        cell_width = img_width // cols
+        cell_height = (img_height - 50) // rows
+        
+        for i, item in enumerate(infographic_data):
+            col = i % cols
+            row = i // cols
+            
+            x = col * cell_width + 20
+            y = 50 + row * cell_height + 20
+            
+            item_type = item.get('type', 'metric')
+            
+            if item_type == 'metric':
+                self._draw_metric_card(draw, item, x, y, font, title_font)
+            elif item_type == 'progress':
+                self._draw_progress_bar(draw, item, x, y, font)
+            elif item_type == 'icon':
+                self._draw_icon_with_text(draw, item, x, y, font)
+        
+        try:
+            # Сохраняем изображение в память
+            img_buffer = BytesIO()
+            pil_img.save(img_buffer, format='PNG')
+            img_buffer.seek(0)
+            
+            # Добавляем в Excel
+            excel_img = Image(img_buffer)
+            excel_img.width = img_width // 2
+            excel_img.height = img_height // 2
+            
+            self.ws.add_image(excel_img, f'B{start_row}')
+            
+        except Exception as e:
+            print(f"Ошибка добавления инфографики в Excel: {e}")
+        
+        return start_row + int(img_height / 30) + 2
+    
+    def _draw_metric_card(self, draw, item, x, y, font, title_font):
+        """Рисование карточки метрики"""
+        card_width = 200
+        card_height = 80
+        
+        # Цвет карточки
+        color = item.get('color', '#4472C4')
+        if color.startswith('#'):
+            color = tuple(int(color[i:i+2], 16) for i in (1, 3, 5))
+        else:
+            color = (68, 114, 196)
+        
+        # Рисуем карточку
+        draw.rectangle([x, y, x + card_width, y + card_height], 
+                      fill=color, outline='black', width=1)
+        
+        # Заголовок
+        label = item.get('label', 'Метрика')
+        draw.text((x + 10, y + 10), label, fill='white', font=font)
+        
+        # Значение
+        value = item.get('value', '0')
+        draw.text((x + 10, y + 35), str(value), fill='white', font=title_font)
+    
+    def _draw_progress_bar(self, draw, item, x, y, font):
+        """Рисование прогресс-бара"""
+        bar_width = 200
+        bar_height = 20
+        progress = item.get('progress', 0)
+        
+        # Фон прогресс-бара
+        draw.rectangle([x, y + 20, x + bar_width, y + 20 + bar_height], 
+                      fill='lightgray', outline='black', width=1)
+        
+        # Заполненная часть
+        filled_width = int(bar_width * progress / 100)
+        color = item.get('color', '#70AD47')
+        if color.startswith('#'):
+            color = tuple(int(color[i:i+2], 16) for i in (1, 3, 5))
+        else:
+            color = (112, 173, 71)
+        
+        if filled_width > 0:
+            draw.rectangle([x, y + 20, x + filled_width, y + 20 + bar_height], 
+                          fill=color, outline='black', width=1)
+        
+        # Подпись
+        label = item.get('label', 'Прогресс')
+        draw.text((x, y), label, fill='black', font=font)
+        
+        # Процент
+        draw.text((x + bar_width + 10, y + 20), f"{progress}%", fill='black', font=font)
+    
+    def _draw_icon_with_text(self, draw, item, x, y, font):
+        """Рисование иконки с текстом"""
+        symbol = item.get('symbol', '●')
+        text = item.get('text', 'Текст')
+        color = item.get('color', '#FFC000')
+        
+        if color.startswith('#'):
+            color = tuple(int(color[i:i+2], 16) for i in (1, 3, 5))
+        else:
+            color = (255, 192, 0)
+        
+        # Рисуем символ
+        try:
+            symbol_font = ImageFont.truetype("arial.ttf", 24)
+        except:
+            symbol_font = ImageFont.load_default()
+        
+        draw.text((x, y), symbol, fill=color, font=symbol_font)
+        
+        # Текст рядом с символом
+        draw.text((x + 30, y + 5), text, fill='black', font=font)
+    
+    def _create_custom_drawing(self, config, start_row):
+        """Создание пользовательского рисунка"""
+        commands = config.get('commands', [])
+        
+        # Создаем изображение
+        img_width = config.get('width', 500)
+        img_height = config.get('height', 300)
+        
+        pil_img = PILImage.new('RGB', (img_width, img_height), 'white')
+        draw = ImageDraw.Draw(pil_img)
+        
+        try:
+            font = ImageFont.truetype("arial.ttf", 12)
+        except:
+            font = ImageFont.load_default()
+        
+        # Выполняем команды рисования
+        for cmd in commands:
+            cmd_type = cmd.get('type', '')
+            
+            if cmd_type == 'rectangle':
+                coords = cmd.get('coords', [0, 0, 100, 100])
+                color = cmd.get('color', '#4472C4')
+                if color.startswith('#'):
+                    color = tuple(int(color[i:i+2], 16) for i in (1, 3, 5))
+                draw.rectangle(coords, fill=color, outline='black', width=2)
+                
+            elif cmd_type == 'circle':
+                coords = cmd.get('coords', [0, 0, 100, 100])
+                color = cmd.get('color', '#70AD47')
+                if color.startswith('#'):
+                    color = tuple(int(color[i:i+2], 16) for i in (1, 3, 5))
+                draw.ellipse(coords, fill=color, outline='black', width=2)
+                
+            elif cmd_type == 'line':
+                coords = cmd.get('coords', [0, 0, 100, 100])
+                color = cmd.get('color', 'black')
+                width = cmd.get('width', 1)
+                draw.line(coords, fill=color, width=width)
+                
+            elif cmd_type == 'text':
+                position = cmd.get('position', [0, 0])
+                text = cmd.get('text', 'Текст')
+                color = cmd.get('color', 'black')
+                size = cmd.get('size', 12)
+                
+                try:
+                    text_font = ImageFont.truetype("arial.ttf", size)
+                except:
+                    text_font = font
+                
+                draw.text(position, text, fill=color, font=text_font)
+        
+        try:
+            # Сохраняем изображение в память
+            img_buffer = BytesIO()
+            pil_img.save(img_buffer, format='PNG')
+            img_buffer.seek(0)
+            
+            # Добавляем в Excel
+            excel_img = Image(img_buffer)
+            excel_img.width = img_width // 2
+            excel_img.height = img_height // 2
+            
+            self.ws.add_image(excel_img, f'B{start_row}')
+            
+        except Exception as e:
+            print(f"Ошибка добавления пользовательского рисунка в Excel: {e}")
+        
+        return start_row + int(img_height / 30) + 2
+
     def save_report(self, filename):
         """Сохранение отчета"""
         self.wb.save(filename)
