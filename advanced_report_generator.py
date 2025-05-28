@@ -361,7 +361,11 @@ class AdvancedExcelRenderer:
         return start_row + len(df) + 15  # Учитываем высоту графика
     
     def _setup_row_grouping(self, start_row, end_row, level=1, hidden=False):
-        """Настройка группировки строк"""
+        """Настройка группировки строк с кнопками сворачивания"""
+        if start_row >= end_row:
+            return
+            
+        # Устанавливаем уровень группировки для каждой строки
         for row in range(start_row, end_row + 1):
             self.ws.row_dimensions[row].outline_level = level
             if hidden:
@@ -602,34 +606,3 @@ def render_template_with_data(template_data, context_data):
     return resolve_data_references(rendered, context_data)
 
 
-if __name__ == "__main__":
-    # Демонстрация использования
-    print("🚀 Создание сложного отчета со сворачиваемыми секциями...")
-    
-    # Создаем шаблон
-    template = create_complex_report_template()
-    print("✅ Шаблон создан: complex_report_template.json")
-    
-    # Генерируем данные
-    sample_data = generate_sample_data()
-    
-    # Рендерим шаблон с данными
-    rendered_template = render_template_with_data(template, sample_data)
-    
-    # Создаем отчет
-    renderer = AdvancedExcelRenderer()
-    workbook = renderer.create_collapsible_report(rendered_template)
-    
-    # Сохраняем
-    output_file = f"complex_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-    renderer.save_report(output_file)
-    
-    print(f"✅ Сложный отчет создан: {output_file}")
-    print("\n📋 Возможности отчета:")
-    print("  • Сворачиваемые секции с кнопками ▼/▶")
-    print("  • Автофильтры в таблицах")
-    print("  • Условное форматирование")
-    print("  • Многоуровневая группировка")
-    print("  • Интерактивные графики")
-    print("  • Закрепленные области")
-    print("  • Автоподбор ширины колонок") 
